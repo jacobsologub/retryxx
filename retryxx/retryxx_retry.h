@@ -39,38 +39,45 @@ static_assert (__cplusplus >= 202002L, "retryxx requires C++20 or later");
 #include <stop_token>
 
 #if __cpp_lib_expected >= 202202L
- #include <expected>
- namespace retryxx
- {
-     template<typename T, typename E>
-     using expected = std::expected<T, E>;
+#include <expected>
 
-     template<typename E>
-     using unexpected = std::unexpected<E>;
- }
+namespace retryxx
+{
+    template<typename T, typename E>
+    using expected = std::expected<T, E>;
+
+    template<typename E>
+    using unexpected = std::unexpected<E>;
+}
+
 #elif __has_include(<tl/expected.hpp>)
- #include <tl/expected.hpp>
- namespace retryxx
- {
-     template<typename T, typename E>
-     using expected = tl::expected<T, E>;
+#include <tl/expected.hpp>
 
-     template<typename E>
-     using unexpected = tl::unexpected<E>;
- }
+namespace retryxx
+{
+    template<typename T, typename E>
+    using expected = tl::expected<T, E>;
+
+    template<typename E>
+    using unexpected = tl::unexpected<E>;
+}
+
 #else
  #error "retryxx requires either C++23 std::expected or tl::expected library (https://github.com/TartanLlama/expected)"
 #endif
 
 #if __cpp_lib_jthread >= 201911L
 #include <stop_token>
+
 namespace retryxx
 {
     using stop_token  = std::stop_token;
     using stop_source = std::stop_source;
 }
+
 #else
 #include <atomic>
+
 namespace retryxx
 {
 /// Fallback implementation of std::stop_token for C++20 compatibility.
@@ -80,13 +87,13 @@ class stop_token
 public:
     stop_token() = default;
     explicit stop_token (const std::atomic<bool>* flag) : stopFlag (flag) {}
-    
+
     /// Returns true if cancellation has been requested
     bool stop_requested() const noexcept { return stopFlag && stopFlag->load(); }
-    
+
     /// Returns true if this token is associated with a stop source
     bool stop_possible() const noexcept  { return stopFlag != nullptr; }
-    
+
 private:
     const std::atomic<bool>* stopFlag = nullptr;
 };
@@ -97,23 +104,26 @@ class stop_source
 {
 public:
     stop_source() = default;
-    
+
     /// Requests cancellation for all associated tokens
     void request_stop() noexcept    { stopped.store (true); }
-    
+
     /// Returns a token that can be used to check for cancellation
     stop_token get_token() noexcept { return stop_token (&stopped); }
-    
+
 private:
     std::atomic<bool> stopped { false };
 };
 
 } // namespace retryxx
+
 #endif
 
 namespace retryxx::detail
 {
+
 bool interruptibleSleep (std::chrono::milliseconds duration, stop_token stopToken);
+
 } // namespace detail
 
 namespace retryxx
@@ -174,7 +184,7 @@ struct BackoffPolicy
 template <Retryable F, typename ShouldRetryPredicate,
                        typename ShouldRetryExceptionPredicate,
                        typename ResultType = std::invoke_result_t<F>>
-expected<ResultType, std::string> retry (F&& func, 
+expected<ResultType, std::string> retry (F&& func,
                                          ShouldRetryPredicate&& shouldRetryPredicate,
                                          ShouldRetryExceptionPredicate&& shouldRetryExceptionPredicate,
                                          int maxAttempts = 5,
@@ -223,17 +233,17 @@ inline bool interruptibleSleep (std::chrono::milliseconds duration, stop_token s
         std::this_thread::sleep_for (duration);
         return false;
     }
-    
+
     auto sleepIncrement = std::chrono::milliseconds (10);
     auto remaining = duration;
-    
+
     while (remaining > std::chrono::milliseconds (0) && ! stopToken.stop_requested())
     {
         auto sleepTime = std::min (sleepIncrement, remaining);
         std::this_thread::sleep_for (sleepTime);
         remaining -= sleepTime;
     }
-    
+
     return stopToken.stop_requested();
 }
 
