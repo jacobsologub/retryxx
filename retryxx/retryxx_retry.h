@@ -36,6 +36,7 @@ static_assert (__cplusplus >= 202002L, "retryxx requires C++20 or later");
 #include <type_traits>
 #include <concepts>
 #include <format>
+#include <stop_token>
 
 #if __cpp_lib_expected >= 202202L
  #include <expected>
@@ -60,6 +61,60 @@ static_assert (__cplusplus >= 202002L, "retryxx requires C++20 or later");
 #else
  #error "retryxx requires either C++23 std::expected or tl::expected library (https://github.com/TartanLlama/expected)"
 #endif
+
+#if __cpp_lib_jthread >= 201911L
+#include <stop_token>
+namespace retryxx
+{
+    using stop_token  = std::stop_token;
+    using stop_source = std::stop_source;
+}
+#else
+#include <atomic>
+namespace retryxx
+{
+/// Fallback implementation of std::stop_token for C++20 compatibility.
+/// Provides cooperative cancellation mechanism when std::stop_token is unavailable.
+class stop_token
+{
+public:
+    stop_token() = default;
+    explicit stop_token (const std::atomic<bool>* flag) : stopFlag (flag) {}
+    
+    /// Returns true if cancellation has been requested
+    bool stop_requested() const noexcept { return stopFlag && stopFlag->load(); }
+    
+    /// Returns true if this token is associated with a stop source
+    bool stop_possible() const noexcept  { return stopFlag != nullptr; }
+    
+private:
+    const std::atomic<bool>* stopFlag = nullptr;
+};
+
+/// Fallback implementation of std::stop_source for C++20 compatibility.
+/// Manages the cancellation state and provides tokens for cooperative cancellation.
+class stop_source
+{
+public:
+    stop_source() = default;
+    
+    /// Requests cancellation for all associated tokens
+    void request_stop() noexcept    { stopped.store (true); }
+    
+    /// Returns a token that can be used to check for cancellation
+    stop_token get_token() noexcept { return stop_token (&stopped); }
+    
+private:
+    std::atomic<bool> stopped { false };
+};
+
+} // namespace retryxx
+#endif
+
+namespace retryxx::detail
+{
+bool interruptibleSleep (std::chrono::milliseconds duration, stop_token stopToken);
+} // namespace detail
 
 namespace retryxx
 {
@@ -114,6 +169,7 @@ struct BackoffPolicy
 /// @param shouldRetryExceptionPredicate    Determines if exception should trigger a retry
 /// @param maxAttempts                      Maximum number of retry attempts
 /// @param backoffPolicy                    Timing configuration for retries
+/// @param stopToken                        Token for cooperative cancellation of retry operation
 /// @returns                                Expected containing either the successful result or error message
 template <Retryable F, typename ShouldRetryPredicate,
                        typename ShouldRetryExceptionPredicate,
@@ -122,7 +178,8 @@ expected<ResultType, std::string> retry (F&& func,
                                          ShouldRetryPredicate&& shouldRetryPredicate,
                                          ShouldRetryExceptionPredicate&& shouldRetryExceptionPredicate,
                                          int maxAttempts = 5,
-                                         BackoffPolicy backoffPolicy = BackoffPolicy{})
+                                         BackoffPolicy backoffPolicy = BackoffPolicy{},
+                                         stop_token stopToken = stop_token{})
 {
     for (int attempts = 0; attempts < maxAttempts; ++attempts)
     {
@@ -130,7 +187,10 @@ expected<ResultType, std::string> retry (F&& func,
         {
             if (attempts > 0)
             {
-                std::this_thread::sleep_for (backoffPolicy.getDelay (attempts));
+                if (detail::interruptibleSleep (backoffPolicy.getDelay (attempts), stopToken))
+                {
+                    return unexpected ("Retry operation was cancelled during backoff.");
+                }
             }
 
             ResultType result = std::invoke (std::forward<F> (func));
@@ -152,3 +212,29 @@ expected<ResultType, std::string> retry (F&& func,
 }
 
 } // namespace retryxx
+
+namespace retryxx::detail
+{
+
+inline bool interruptibleSleep (std::chrono::milliseconds duration, stop_token stopToken)
+{
+    if (! stopToken.stop_possible())
+    {
+        std::this_thread::sleep_for (duration);
+        return false;
+    }
+    
+    auto sleepIncrement = std::chrono::milliseconds (10);
+    auto remaining = duration;
+    
+    while (remaining > std::chrono::milliseconds (0) && ! stopToken.stop_requested())
+    {
+        auto sleepTime = std::min (sleepIncrement, remaining);
+        std::this_thread::sleep_for (sleepTime);
+        remaining -= sleepTime;
+    }
+    
+    return stopToken.stop_requested();
+}
+
+} // namespace detail
